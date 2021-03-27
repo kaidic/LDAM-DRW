@@ -19,7 +19,7 @@ from tensorboardX import SummaryWriter
 from sklearn.metrics import confusion_matrix
 from utils import *
 from imbalance_cifar import IMBALANCECIFAR10, IMBALANCECIFAR100
-from losses import LDAMLoss, FocalLoss
+from losses import LDAMLoss, FocalLoss, VSLoss
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -66,14 +66,15 @@ parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
 parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
-parser.add_argument('--root_log',type=str, default='log')
+parser.add_argument('--root_log', type=str, default='log')
 parser.add_argument('--root_model', type=str, default='checkpoint')
+parser.add_argument('--dr', '--downsampling_ratio', default=1.0, type=float)
 best_acc1 = 0
 
 
 def main():
     args = parser.parse_args()
-    args.store_name = '_'.join([args.dataset, args.arch, args.loss_type, args.train_rule, args.imb_type, str(args.imb_factor), args.exp_str])
+    args.store_name = '_'.join([args.dataset, str(args.dr), args.arch, args.loss_type, args.train_rule, args.imb_type, str(args.imb_factor), args.exp_str])
     prepare_folders(args)
     if args.seed is not None:
         random.seed(args.seed)
@@ -151,14 +152,19 @@ def main_worker(gpu, ngpus_per_node, args):
     ])
 
     if args.dataset == 'cifar10':
-        train_dataset = IMBALANCECIFAR10(root='./data', imb_type=args.imb_type, imb_factor=args.imb_factor, rand_number=args.rand_number, train=True, download=True, transform=transform_train)
+        train_dataset = IMBALANCECIFAR10(root='./data', imb_type=args.imb_type, imb_factor=args.imb_factor,
+                                         downsampling_ratio=args.dr, rand_number=args.rand_number, train=True,
+                                         download=True, transform=transform_train)
         val_dataset = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_val)
     elif args.dataset == 'cifar100':
-        train_dataset = IMBALANCECIFAR100(root='./data', imb_type=args.imb_type, imb_factor=args.imb_factor, rand_number=args.rand_number, train=True, download=True, transform=transform_train)
+        train_dataset = IMBALANCECIFAR100(root='./data', imb_type=args.imb_type, imb_factor=args.imb_factor,
+                                          downsampling_ratio=args.dr, rand_number=args.rand_number, train=True,
+                                          download=True, transform=transform_train)
         val_dataset = datasets.CIFAR100(root='./data', train=False, download=True, transform=transform_val)
     else:
         warnings.warn('Dataset is not listed')
         return
+
     cls_num_list = train_dataset.get_cls_num_list()
     print('cls num list:')
     print(cls_num_list)
@@ -213,6 +219,12 @@ def main_worker(gpu, ngpus_per_node, args):
             criterion = LDAMLoss(cls_num_list=cls_num_list, max_m=0.5, s=30, weight=per_cls_weights).cuda(args.gpu)
         elif args.loss_type == 'Focal':
             criterion = FocalLoss(weight=per_cls_weights, gamma=1).cuda(args.gpu)
+        elif args.loss_type == 'VS':
+            criterion = VSLoss(min_cls_list=[5, 6, 7, 8, 9], Delta_pos=(args.imb_factor/5)**(1/4),
+                               Delta_neg=((1-args.imb_factor)/5)**(1/4), weight=per_cls_weights).cuda(args.gpu)
+        elif args.loss_type == 'LA':
+            criterion = VSLoss(min_cls_list=[5, 6, 7, 8, 9], iota_pos=(args.imb_factor/5)**(-1/4),
+                               iota_neg=((1-args.imb_factor)/5)**(-1/4), weight=per_cls_weights).cuda(args.gpu)
         else:
             warnings.warn('Loss type is not listed')
             return
@@ -238,7 +250,7 @@ def main_worker(gpu, ngpus_per_node, args):
             'arch': args.arch,
             'state_dict': model.state_dict(),
             'best_acc1': best_acc1,
-            'optimizer' : optimizer.state_dict(),
+            'optimizer': optimizer.state_dict(),
         }, is_best)
 
 
@@ -297,6 +309,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args, log, tf_writer
     tf_writer.add_scalar('acc/train_top1', top1.avg, epoch)
     tf_writer.add_scalar('acc/train_top5', top5.avg, epoch)
     tf_writer.add_scalar('lr', optimizer.param_groups[-1]['lr'], epoch)
+
 
 def validate(val_loader, model, criterion, epoch, args, log=None, tf_writer=None, flag='val'):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -363,6 +376,7 @@ def validate(val_loader, model, criterion, epoch, args, log=None, tf_writer=None
 
     return top1.avg
 
+
 def adjust_learning_rate(optimizer, epoch, args):
     """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
     epoch = epoch + 1
@@ -376,6 +390,7 @@ def adjust_learning_rate(optimizer, epoch, args):
         lr = args.lr
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
+
 
 if __name__ == '__main__':
     main()
